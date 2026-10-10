@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flock — murmuration</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; background: #0a0e17; }
+  canvas { position: fixed; inset: 0; display: block; cursor: crosshair; }
+
+  #panel {
+    position: fixed; top: 16px; right: 16px; width: 232px;
+    background: rgba(15, 20, 32, 0.72);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    color: #cdd6e4;
+    font: 12px/1.4 system-ui, -apple-system, sans-serif;
+    user-select: none;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+    z-index: 10;
+  }
+  #panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; cursor: default;
+  }
+  #panel-head .title { font-weight: 600; letter-spacing: 0.4px; font-size: 13px; }
+  #fps { color: #6b7688; font-variant-numeric: tabular-nums; font-size: 11px; }
+  #collapse {
+    background: none; border: none; color: #6b7688; cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+  }
+  #collapse:hover { color: #cdd6e4; background: rgba(255,255,255,0.06); }
+  #panel-body { padding: 4px 14px 14px; }
+  #panel.collapsed #panel-body { display: none; }
+
+  .row { margin-top: 10px; }
+  .row label {
+    display: flex; justify-content: space-between;
+    margin-bottom: 4px; color: #9aa5b8;
+  }
+  .row label b { color: #cdd6e4; font-weight: 500; font-variant-numeric: tabular-nums; }
+  input[type="range"] { width: 100%; accent-color: #7aa2f7; cursor: pointer; }
+
+  .btns { display: flex; gap: 8px; margin-top: 14px; }
+  .btns button {
+    flex: 1; padding: 6px 0;
+    background: rgba(122, 162, 247, 0.12);
+    border: 1px solid rgba(122, 162, 247, 0.25);
+    border-radius: 8px; color: #a8c0f8;
+    font: inherit; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .btns button:hover { background: rgba(122, 162, 247, 0.24); }
+  .btns button:active { transform: translateY(1px); }
+
+  #hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: #4a5468; font: 11px system-ui, sans-serif;
+    letter-spacing: 0.5px; white-space: nowrap;
+    pointer-events: none;
+  }
+  #hint b { color: #6b7688; font-weight: 500; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="panel">
+  <div id="panel-head">
+    <span class="title">🐦 flock</span>
+    <span><span id="fps">— fps</span><button id="collapse" title="collapse">–</button></span>
+  </div>
+  <div id="panel-body">
+    <div class="row">
+      <label>flock size <b id="v-count">300</b></label>
+      <input type="range" id="count" min="20" max="900" step="10" value="300">
+    </div>
+    <div class="row">
+      <label>max speed <b id="v-speed">3.5</b></label>
+      <input type="range" id="speed" min="1" max="7" step="0.1" value="3.5">
+    </div>
+    <div class="row">
+      <label>separation <b id="v-sep">1.6</b></label>
+      <input type="range" id="sep" min="0" max="3" step="0.05" value="1.6">
+    </div>
+    <div class="row">
+      <label>alignment <b id="v-align">1.0</b></label>
+      <input type="range" id="align" min="0" max="3" step="0.05" value="1.0">
+    </div>
+    <div class="row">
+      <label>cohesion <b id="v-coh">0.9</b></label>
+      <input type="range" id="coh" min="0" max="3" step="0.05" value="0.9">
+    </div>
+    <div class="btns">
+      <button id="pause">⏸ pause</button>
+      <button id="reset">↻ reset</button>
+    </div>
+  </div>
+</div>
+
+<div id="hint"><b>move</b> hawk &nbsp;·&nbsp; <b>click</b> food &nbsp;·&nbsp; <b>space</b> pause &nbsp;·&nbsp; <b>r</b> reset</div>
+
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const params = {
+  count: 300,
+  maxSpeed: 3.5,
+  minSpeed: 1.2,
+  maxForce: 0.08,
+  perception: 60,
+  sepRadius: 26,
+  sep: 1.6,
+  align: 1.0,
+  coh: 0.9,
+  edgeMargin: 90,
+  edgeForce: 0.25,
+  hawkRadius: 140,
+  hawkForce: 1.1,
+  foodLife: 4000,
+  foodForce: 0.6,
+};
+
+let W = 0, H = 0;
+let boids = [];
+let foods = [];            // { x, y, t0 }
+const mouse = { x: 0, y: 0, active: false };
+let paused = false;
+
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function makeBoid() {
+  const a = rand(0, Math.PI * 2);
+  const s = rand(params.minSpeed, params.maxSpeed);
+  return {
+    x: rand(0, W), y: rand(0, H),
+    vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+    ax: 0, ay: 0,
+    size: rand(2.2, 3.4),
+  };
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+
+function syncCount() {
+  while (boids.length < params.count) boids.push(makeBoid());
+  if (boids.length > params.count) boids.length = params.count;
+}
+
+function reset() {
+  boids = [];
+  foods = [];
+  syncCount();
+  ctx.fillStyle = '#0a0e17';
+  ctx.fillRect(0, 0, W, H);
+}
+
+// Steering: desired direction (dx,dy) -> capped force added to b.
+function limitSteer(b, dx, dy, w) {
+  if (w === 0) return;
+  const m = Math.hypot(dx, dy);
+  if (m < 1e-5) return;
+  let sx = dx / m * params.maxSpeed - b.vx;
+  let sy = dy / m * params.maxSpeed - b.vy;
+  const fm = Math.hypot(sx, sy);
+  if (fm > params.maxForce) { sx = sx / fm * params.maxForce; sy = sy / fm * params.maxForce; }
+  b.ax += sx * w;
+  b.ay += sy * w;
+}
+
+function step(dt, now) {
+  // spatial hash so neighbor search stays ~O(n)
+  const cell = params.perception;
+  const grid = new Map();
+  for (let i = 0; i < boids.length; i++) {
+    const b = boids[i];
+    const key = ((b.x / cell) | 0) * 4096 + ((b.y / cell) | 0);
+    let arr = grid.get(key);
+    if (!arr) grid.set(key, arr = []);
+    arr.push(i);
+  }
+
+  const per2 = params.perception * params.perception;
+  const sep2 = params.sepRadius * params.sepRadius;
+
+  // pass 1: accumulate forces
+  for (let i = 0; i < boids.length; i++) {
+    const b = boids[i];
+    b.ax = 0; b.ay = 0;
+
+    let alX = 0, alY = 0, coX = 0, coY = 0, seX = 0, seY = 0, n = 0;
+    const cx = (b.x / cell) | 0, cy = (b.y / cell) | 0;
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const arr = grid.get(gx * 4096 + gy);
+        if (!arr) continue;
+        for (let k = 0; k < arr.length; k++) {
+          const j = arr[k];
+          if (j === i) continue;
+          const o = boids[j];
+          const dx = o.x - b.x, dy = o.y - b.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 > per2) continue;
+          alX += o.vx; alY += o.vy;
+          coX += o.x; coY += o.y;
+          n++;
+          if (d2 < sep2) {
+            const d = Math.sqrt(d2) || 0.001;
+            const push = 1 - d / params.sepRadius;
+            seX -= dx / d * push;
+            seY -= dy / d * push;
+          }
+        }
+      }
+    }
+    if (n > 0) {
+      limitSteer(b, alX, alY, params.align);                       // alignment
+      limitSteer(b, coX / n - b.x, coY / n - b.y, params.coh);      // cohesion
+    }
+    limitSteer(b, seX, seY, params.sep);                            // separation
+
+    // hawk (cursor): scatter, stronger the closer you are
+    if (mouse.active) {
+      const dx = b.x - mouse.x, dy = b.y - mouse.y;
+      const d = Math.hypot(dx, dy);
+      if (d < params.hawkRadius) {
+        limitSteer(b, dx, dy, 0.25 + params.hawkForce * (1 - d / params.hawkRadius));
+      }
+    }
+
+    // food: attract while it lasts
+    for (let f = 0; f < foods.length; f++) {
+      const food = foods[f];
+      const dx = food.x - b.x, dy = food.y - b.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 4) {
+        const w = 0.1 + params.foodForce * (1 - (now - food.t0) / params.foodLife);
+        limitSteer(b, dx, dy, w);
+      }
+    }
+
+    // soft walls
+    const m = params.edgeMargin, f = params.edgeForce;
+    if (b.x < m) b.ax += f * (1 - b.x / m);
+    else if (b.x > W - m) b.ax -= f * (1 - (W - b.x) / m);
+    if (b.y < m) b.ay += f * (1 - b.y / m);
+    else if (b.y > H - m) b.ay -= f * (1 - (H - b.y) / m);
+  }
+
+  // pass 2: integrate
+  for (let i = 0; i < boids.length; i++) {
+    const b = boids[i];
+    b.vx += b.ax * dt;
+    b.vy += b.ay * dt;
+    let sp = Math.hypot(b.vx, b.vy);
+    if (sp > params.maxSpeed) {
+      const k = params.maxSpeed / sp;
+      b.vx *= k; b.vy *= k;
+      sp = params.maxSpeed;
+    } else if (sp < params.minSpeed && sp > 1e-4) {
+      const k = params.minSpeed / sp;
+      b.vx *= k; b.vy *= k;
+    }
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    // hard clamp + reflect, in case the hawk shoves someone out
+    if (b.x < 0) { b.x = 0; b.vx = Math.abs(b.vx); }
+    else if (b.x > W) { b.x = W; b.vx = -Math.abs(b.vx); }
+    if (b.y < 0) { b.y = 0; b.vy = Math.abs(b.vy); }
+    else if (b.y > H) { b.y = H; b.vy = -Math.abs(b.vy); }
+  }
+}
+
+function draw(now) {
+  // motion trails: translucent bg wash
+  ctx.fillStyle = 'rgba(10, 14, 23, 0.3)';
+  ctx.fillRect(0, 0, W, H);
+
+  // food points: pulsing glow that fades over its lifetime
+  for (const food of foods) {
+    const life = 1 - (now - food.t0) / params.foodLife;
+    const r = (5 + 3 * Math.sin(now * 0.008)) * life + 1;
+    ctx.beginPath();
+    ctx.arc(food.x, food.y, r * 2.6, 0, 7);
+    ctx.fillStyle = 'rgba(255, 200, 90, ' + (0.10 * life).toFixed(3) + ')';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(food.x, food.y, r, 0, 7);
+    ctx.fillStyle = 'rgba(255, 200, 90, ' + (0.55 * life).toFixed(3) + ')';
+    ctx.fill();
+  }
+
+  // hawk radius ring
+  if (mouse.active) {
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, params.hawkRadius, 0, 7);
+    ctx.strokeStyle = 'rgba(255, 90, 90, 0.10)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // boids: velocity-aligned triangles, hue shifts blue -> pink with speed
+  const maxS = params.maxSpeed;
+  for (let i = 0; i < boids.length; i++) {
+    const b = boids[i];
+    const sp = Math.hypot(b.vx, b.vy);
+    const ratio = Math.min(sp / maxS, 1);
+    const hue = 200 + ratio * 120;
+
+    const cos = b.vx / (sp || 1), sin = b.vy / (sp || 1);
+    const px = -sin, py = cos;
+    const s = b.size;
+    const nx = b.x + cos * 2.2 * s, ny = b.y + sin * 2.2 * s;
+    const bx = b.x - cos * s, by = b.y - sin * s;
+
+    ctx.beginPath();
+    ctx.moveTo(nx, ny);
+    ctx.lineTo(bx + px * 0.9 * s, by + py * 0.9 * s);
+    ctx.lineTo(bx - px * 0.9 * s, by - py * 0.9 * s);
+    ctx.closePath();
+    ctx.fillStyle = 'hsl(' + hue.toFixed(0) + ' 85% 62%)';
+    ctx.fill();
+  }
+}
+
+// ---------- main loop ----------
+let last = performance.now();
+let fpsEma = 60, lastFpsUpd = 0;
+const fpsEl = document.getElementById('fps');
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const d = now - last;
+  last = now;
+
+  fpsEma = fpsEma * 0.9 + (1000 / Math.max(d, 0.1)) * 0.1;
+  if (now - lastFpsUpd > 500) {
+    fpsEl.textContent = Math.round(fpsEma) + ' fps';
+    lastFpsUpd = now;
+  }
+
+  foods = foods.filter(f => now - f.t0 < params.foodLife);
+  const dt = Math.min(d / 16.667, 2.5);
+  if (!paused) step(dt, now);
+  draw(now);
+}
+
+// ---------- input ----------
+canvas.addEventListener('pointermove', e => {
+  mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
+});
+canvas.addEventListener('pointerleave', () => { mouse.active = false; });
+canvas.addEventListener('pointerdown', e => {
+  foods.push({ x: e.clientX, y: e.clientY, t0: performance.now() });
+});
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('pause').textContent = paused ? '▶ resume' : '⏸ pause';
+}
+function resetFlock() {
+  reset();
+  if (paused) togglePause();
+}
+
+document.getElementById('pause').addEventListener('click', e => { togglePause(); e.currentTarget.blur(); });
+document.getElementById('reset').addEventListener('click', e => { resetFlock(); e.currentTarget.blur(); });
+document.getElementById('collapse').addEventListener('click', e => {
+  const p = document.getElementById('panel');
+  p.classList.toggle('collapsed');
+  e.currentTarget.textContent = p.classList.contains('collapsed') ? '+' : '–';
+  e.currentTarget.blur();
+});
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+  else if (e.key === 'r' || e.key === 'R') resetFlock();
+});
+
+// ---------- sliders ----------
+function bind(id, key, decimals, onChange) {
+  const el = document.getElementById(id);
+  const out = document.getElementById('v-' + id);
+  const update = () => {
+    params[key] = parseFloat(el.value);
+    out.textContent = decimals != null ? params[key].toFixed(decimals) : String(params[key]);
+    if (onChange) onChange();
+  };
+  el.addEventListener('input', update);
+  update();
+}
+bind('count', 'count', 0, syncCount);
+bind('speed', 'maxSpeed', 1);
+bind('sep', 'sep', 2);
+bind('align', 'align', 2);
+bind('coh', 'coh', 2);
+
+// ---------- go ----------
+resize();
+syncCount();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
