@@ -44,7 +44,20 @@
   .row label b { color: #cdd6e4; font-weight: 500; font-variant-numeric: tabular-nums; }
   input[type="range"] { width: 100%; accent-color: #7aa2f7; cursor: pointer; }
 
-  .btns { display: flex; gap: 8px; margin-top: 14px; }
+  .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 12px; }
+  .presets button {
+    padding: 5px 0; font: inherit;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 7px; color: #9aa5b8; cursor: pointer;
+    transition: background 0.15s;
+  }
+  .presets button:hover { background: rgba(255, 255, 255, 0.12); color: #cdd6e4; }
+
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #9aa5b8; cursor: pointer; }
+  .check input { accent-color: #7aa2f7; cursor: pointer; }
+
+  .btns { display: flex; gap: 8px; margin-top: 12px; }
   .btns button {
     flex: 1; padding: 6px 0;
     background: rgba(122, 162, 247, 0.12);
@@ -74,6 +87,12 @@
     <span><span id="fps">— fps</span><button id="collapse" title="collapse">–</button></span>
   </div>
   <div id="panel-body">
+    <div class="presets">
+      <button data-preset="murmuration">murmur</button>
+      <button data-preset="gas">gas</button>
+      <button data-preset="river">river</button>
+      <button data-preset="chaos">chaos</button>
+    </div>
     <div class="row">
       <label>flock size <b id="v-count">300</b></label>
       <input type="range" id="count" min="20" max="900" step="10" value="300">
@@ -94,6 +113,11 @@
       <label>cohesion <b id="v-coh">0.9</b></label>
       <input type="range" id="coh" min="0" max="3" step="0.05" value="0.9">
     </div>
+    <label class="check"><input type="checkbox" id="trailsToggle"> long exposure</label>
+    <div class="btns">
+      <button id="gust">🌬 gust</button>
+      <button id="save">📷 save</button>
+    </div>
     <div class="btns">
       <button id="pause">⏸ pause</button>
       <button id="reset">↻ reset</button>
@@ -101,7 +125,7 @@
   </div>
 </div>
 
-<div id="hint"><b>move</b> hawk &nbsp;·&nbsp; <b>click</b> food &nbsp;·&nbsp; <b>space</b> pause &nbsp;·&nbsp; <b>r</b> reset</div>
+<div id="hint"><b>move</b> hawk &nbsp;·&nbsp; <b>click</b> food &nbsp;·&nbsp; <b>w</b> gust &nbsp;·&nbsp; <b>t</b> trails &nbsp;·&nbsp; <b>space</b> pause &nbsp;·&nbsp; <b>r</b> reset</div>
 
 <script>
 'use strict';
@@ -132,6 +156,11 @@ let boids = [];
 let foods = [];            // { x, y, t0 }
 const mouse = { x: 0, y: 0, active: false };
 let paused = false;
+let longExposure = false;
+
+// wind gust: { dir, strength, t0, life }
+let gust = null;
+let streaks = []; // visual streak lines for the gust
 
 const rand = (a, b) => a + Math.random() * (b - a);
 
@@ -146,6 +175,15 @@ function makeBoid() {
   };
 }
 
+function makeStreaks() {
+  streaks = [];
+  for (let i = 0; i < 24; i++) streaks.push({ x: rand(0, W), y: rand(0, H), t: Math.random() });
+}
+
+function triggerGust(dir) {
+  gust = { dir: dir !== undefined ? dir : Math.random() * Math.PI * 2, strength: 0.18, t0: performance.now(), life: 1800 };
+}
+
 function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth;
@@ -157,6 +195,7 @@ function resize() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
+  makeStreaks();
 }
 window.addEventListener('resize', resize);
 
@@ -168,6 +207,7 @@ function syncCount() {
 function reset() {
   boids = [];
   foods = [];
+  gust = null;
   syncCount();
   ctx.fillStyle = '#0a0e17';
   ctx.fillRect(0, 0, W, H);
@@ -201,10 +241,21 @@ function step(dt, now) {
   const per2 = params.perception * params.perception;
   const sep2 = params.sepRadius * params.sepRadius;
 
+  // wind envelope
+  let gX = 0, gY = 0;
+  if (gust) {
+    const age = now - gust.t0;
+    if (age < gust.life) {
+      const env = Math.sin(Math.PI * age / gust.life);
+      gX = Math.cos(gust.dir) * gust.strength * env;
+      gY = Math.sin(gust.dir) * gust.strength * env;
+    } else gust = null;
+  }
+
   // pass 1: accumulate forces
   for (let i = 0; i < boids.length; i++) {
     const b = boids[i];
-    b.ax = 0; b.ay = 0;
+    b.ax = gX; b.ay = gY;
 
     let alX = 0, alY = 0, coX = 0, coY = 0, seX = 0, seY = 0, n = 0;
     const cx = (b.x / cell) | 0, cy = (b.y / cell) | 0;
@@ -282,7 +333,7 @@ function step(dt, now) {
     b.x += b.vx * dt;
     b.y += b.vy * dt;
 
-    // hard clamp + reflect, in case the hawk shoves someone out
+    // hard clamp + reflect, in case a predator shoves someone out
     if (b.x < 0) { b.x = 0; b.vx = Math.abs(b.vx); }
     else if (b.x > W) { b.x = W; b.vx = -Math.abs(b.vx); }
     if (b.y < 0) { b.y = 0; b.vy = Math.abs(b.vy); }
@@ -291,9 +342,26 @@ function step(dt, now) {
 }
 
 function draw(now) {
-  // motion trails: translucent bg wash
-  ctx.fillStyle = 'rgba(10, 14, 23, 0.3)';
+  // motion trails: translucent bg wash (long exposure = almost no wash)
+  ctx.fillStyle = longExposure ? 'rgba(10, 14, 23, 0.015)' : 'rgba(10, 14, 23, 0.3)';
   ctx.fillRect(0, 0, W, H);
+
+  // gust streaks
+  if (gust) {
+    const age = Math.min(now - gust.t0, gust.life);
+    const env = Math.sin(Math.PI * age / gust.life);
+    const cs = Math.cos(gust.dir), sn = Math.sin(gust.dir);
+    ctx.strokeStyle = 'rgba(158, 203, 255, ' + (0.10 * env).toFixed(3) + ')';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const s of streaks) {
+      const p = (now * 0.0005 + s.t) % 1;
+      const x = s.x + cs * (p - 0.5) * 900, y = s.y + sn * (p - 0.5) * 900;
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - cs * 46, y - sn * 46);
+    }
+    ctx.stroke();
+  }
 
   // food points: pulsing glow that fades over its lifetime
   for (const food of foods) {
@@ -381,9 +449,22 @@ function resetFlock() {
   reset();
   if (paused) togglePause();
 }
+function toggleTrails() {
+  longExposure = !longExposure;
+  document.getElementById('trailsToggle').checked = longExposure;
+}
+function saveFrame() {
+  const a = document.createElement('a');
+  a.download = 'flock-' + Date.now() + '.png';
+  a.href = canvas.toDataURL('image/png');
+  a.click();
+}
 
 document.getElementById('pause').addEventListener('click', e => { togglePause(); e.currentTarget.blur(); });
 document.getElementById('reset').addEventListener('click', e => { resetFlock(); e.currentTarget.blur(); });
+document.getElementById('gust').addEventListener('click', e => { triggerGust(); e.currentTarget.blur(); });
+document.getElementById('save').addEventListener('click', e => { saveFrame(); e.currentTarget.blur(); });
+document.getElementById('trailsToggle').addEventListener('change', e => { longExposure = e.target.checked; });
 document.getElementById('collapse').addEventListener('click', e => {
   const p = document.getElementById('panel');
   p.classList.toggle('collapsed');
@@ -394,6 +475,28 @@ document.getElementById('collapse').addEventListener('click', e => {
 window.addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); togglePause(); }
   else if (e.key === 'r' || e.key === 'R') resetFlock();
+  else if (e.key === 'w' || e.key === 'W') triggerGust();
+  else if (e.key === 't' || e.key === 'T') toggleTrails();
+});
+
+// ---------- presets ----------
+const presets = {
+  murmuration: { count: 300, speed: 3.5, sep: 1.6, align: 1.0, coh: 0.9 },
+  gas:         { count: 400, speed: 4.0, sep: 2.8, align: 0.1, coh: 0.0 },
+  river:       { count: 500, speed: 5.5, sep: 1.0, align: 3.0, coh: 0.4 },
+  chaos:       { count: 350, speed: 6.5, sep: 2.2, align: 0.0, coh: 2.6 },
+};
+function applyPreset(name) {
+  const p = presets[name];
+  if (!p) return;
+  for (const [id, v] of Object.entries({ count: p.count, speed: p.speed, sep: p.sep, align: p.align, coh: p.coh })) {
+    const el = document.getElementById(id);
+    el.value = v;
+    el.dispatchEvent(new Event('input'));
+  }
+}
+document.querySelectorAll('.presets button').forEach(btn => {
+  btn.addEventListener('click', e => { applyPreset(e.currentTarget.dataset.preset); e.currentTarget.blur(); });
 });
 
 // ---------- sliders ----------
@@ -418,6 +521,9 @@ bind('coh', 'coh', 2);
 resize();
 syncCount();
 requestAnimationFrame(frame);
+
+// console playground hook: flock.params.maxSpeed = 6, flock.triggerGust(0), ...
+window.flock = { params, boids, foods, presets, applyPreset, triggerGust, reset };
 </script>
 </body>
 </html>
