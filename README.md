@@ -1,5 +1,7 @@
 # 🐦 flock
 
+**[▶ Live demo](https://vesanieminen.github.io/flock/)** — no install, just open and play.
+
 A starling murmuration that runs itself — hundreds of boids following three
 simple local rules, no choreography, emergent everything. One self-contained
 HTML file, zero dependencies, no build step.
@@ -9,8 +11,8 @@ HTML file, zero dependencies, no build step.
 ## Run it
 
 ```bash
-open flock.html          # macOS
-xdg-open flock.html      # Linux
+open index.html          # macOS
+xdg-open index.html      # Linux
 ```
 
 Or just drag the file into any browser.
